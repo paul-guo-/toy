@@ -211,8 +211,8 @@ show_usage()
 	fprintf(stderr, "Usage: [-v] -t type [-p] [-e time] [-n test_loop_cnt] [-h]\n");
 	fprintf(stderr, "	-v: verbose printing\n");
 	fprintf(stderr, "	-t type: (u: unix domain socket, s: semaphore)\n");
-	fprintf(stderr, "	-p: Use process instead (Use pthread by default)\n");
-	fprintf(stderr, "	-e seconds: sleep times after test is done. People might want to check process stat data.\n");
+	fprintf(stderr, "	-p: Use process instead (pthread if not specified)\n");
+	fprintf(stderr, "	-e seconds: sleep time after test is done. People might want to check process info.\n");
 	fprintf(stderr, "	-n count: Test loop count. %d by default\n", DEFAULT_LOOP_CNT);
 	fprintf(stderr, "	-h: Show usage.\n");
 }
