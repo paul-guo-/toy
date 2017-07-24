@@ -1,3 +1,7 @@
+.PHONY: all clean default
+
+default: all
+
 sio: sio.c
 	gcc sio.c -lpthread -lrt -o sio
 
@@ -9,5 +13,7 @@ ipc: ipc.c
 
 all: sio mc_proxy ipc
 
+
 clean:
 	rm -f sio mc_proxy ipc
+
