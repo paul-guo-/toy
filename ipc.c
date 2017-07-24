@@ -290,7 +290,6 @@ main(int argc, char *argv[])
 	enum IPC_TYPE ipc_type = IPC_NONE;
 	int sleep_time = 1;
 
-	use_process = 1;
 	while((opt = getopt( argc, argv, "vpe:n:t:h")) != -1) {
 		switch( opt ) {
 		case 'v':
