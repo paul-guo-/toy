@@ -20,7 +20,8 @@ enum IPC_TYPE {
 	IPC_SEM,	/* semaphore */
 };
 
-static int loop_cnt = 100000;
+#define DEFAULT_LOOP_CNT 100000
+static int loop_cnt = DEFAULT_LOOP_CNT;
 
 #define debug_print(...) if (is_verbose) fprintf(stderr, __VA_ARGS__)
 #define debug_abort(...)  {fprintf(stderr, __VA_ARGS__); fflush(stderr); exit(1); }
@@ -74,18 +75,22 @@ shmset(size_t bytes, char *fn, int proj_id, int *id)
     return p;
 }
 
+#define SEM_S_TX_FILE "/tmp/tmp.sem.server.tx"
+#define SEM_C_TX_FILE "/tmp/tmp.sem.client.tx"
 void
 sem_server_handler()
 {
 	sem_t *p_tx, *p_rx;
 	int id_tx, id_rx, i;
 
-	unlink("/tmp/tmp.sem.server.tx");
-	unlink("/tmp/tmp.sem.client.tx");
-	creat("/tmp/tmp.sem.server.tx", 0666);
-	creat("/tmp/tmp.sem.client.tx", 0666);
-	p_tx = shmset(sizeof(sem_t), "/tmp/tmp.sem.server.tx", 't', &id_tx);
-	p_rx = shmset(sizeof(sem_t), "/tmp/tmp.sem.client.tx", 't', &id_rx);
+	unlink(SEM_S_TX_FILE);
+	if (creat(SEM_S_TX_FILE, 0666) < 0)
+		debug_abort("cannot create file %s with errno %d\n", SEM_S_TX_FILE, errno);
+	unlink(SEM_C_TX_FILE);
+	if (creat(SEM_C_TX_FILE, 0666) < 0)
+		debug_abort("cannot create file %s with errno %d\n", SEM_C_TX_FILE, errno);
+	p_tx = shmset(sizeof(sem_t), SEM_S_TX_FILE, 't', &id_tx);
+	p_rx = shmset(sizeof(sem_t), SEM_C_TX_FILE, 't', &id_rx);
 
 	for (i = 0; i < loop_cnt; i++) {
 		sem_post(p_tx);
@@ -106,8 +111,8 @@ sem_client_handler()
 	int id_tx, id_rx, i;
 	struct timespec t1, t2;
 
-	p_rx = shmset(sizeof(sem_t), "/tmp/tmp.sem.server.tx", 't', &id_rx);
-	p_tx = shmset(sizeof(sem_t), "/tmp/tmp.sem.client.tx", 't', &id_tx);
+	p_rx = shmset(sizeof(sem_t), SEM_S_TX_FILE, 't', &id_rx);
+	p_tx = shmset(sizeof(sem_t), SEM_C_TX_FILE, 't', &id_tx);
 
 	t1 = gettimespec();
 	for (i = 0; i < loop_cnt; i++) {
@@ -124,6 +129,8 @@ sem_client_handler()
 	shmctl(id_rx, IPC_RMID, NULL);
 }
 
+#define UDS_FILE "/tmp/tmp.uds"
+
 void
 uds_server_handler()
 {
@@ -138,8 +145,8 @@ uds_server_handler()
 	/* accept. */
 	memset(&un, 0, sizeof(un));
 	un.sun_family = AF_UNIX;
-	strncpy(un.sun_path, "/tmp/tmp.uds", sizeof(un.sun_path) - 1);
-	unlink("/tmp/tmp.uds");
+	strncpy(un.sun_path, UDS_FILE, sizeof(un.sun_path) - 1);
+	unlink(UDS_FILE);
 
 	if (bind(fd, (struct sockaddr *) &un, sizeof(un)) < 0)
 		debug_abort("bind() fails with errno %d\n", errno);
@@ -173,7 +180,7 @@ uds_client_handler()
 	/* Now connect to the server at first. */
     memset(&un, 0, sizeof(un));
     un.sun_family = AF_UNIX;
-    strncpy(un.sun_path, "/tmp/tmp.uds", sizeof(un.sun_path) - 1);
+    strncpy(un.sun_path, UDS_FILE, sizeof(un.sun_path) - 1);
 
     if (connect(fd, (struct sockaddr *) &un, sizeof(un)) < 0)
 		debug_abort("connect() fails with errno %d\n", errno);
@@ -194,11 +201,11 @@ uds_client_handler()
 static void
 show_usage()
 {
-	fprintf(stderr, "Usage: [-v] -s/-c -t type [-n test_cnt]\n");
+	fprintf(stderr, "Usage: [-v] -s|-c -t type [-n test_cnt]\n");
 	fprintf(stderr, "	-v: verbose\n");
 	fprintf(stderr, "	-s: server\n");
 	fprintf(stderr, "	-c: client\n");
-	fprintf(stderr, "	-n: test loop count\n");
+	fprintf(stderr, "	-n: test loop count. %d by default\n", DEFAULT_LOOP_CNT);
 	fprintf(stderr, "	-t: type (u: unix domain socket, s: semaphore)\n");
 }
 
@@ -254,14 +261,14 @@ main(int argc, char *argv[])
 		debug_abort("Must set an ipc type.\n");
 
 	if (ipc_type == IPC_SEM) {
-		printf("Test semaphore\n");
+		printf("Test semaphore with loop count %d\n", loop_cnt);
 		if (is_server) {
 			sem_server_handler();
 		} else {
 			sem_client_handler();
 		}
 	} else if (ipc_type == IPC_UDS) {
-		printf("Test UDS\n");
+		printf("Test UDS with loop count %d\n", loop_cnt);
 		if (is_server) {
 			uds_server_handler();
 		} else {
