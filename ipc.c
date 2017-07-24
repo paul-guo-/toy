@@ -16,6 +16,7 @@ enum IPC_TYPE {
 	IPC_NONE,	/* none */
 	IPC_UDS,	/* unix domain socket */
 	IPC_SEM,	/* semaphore */
+	IPC_SPIN,	/* spin checking via shared memory. */
 };
 
 #define DEFAULT_LOOP_CNT 100000
@@ -47,57 +48,61 @@ gettimespec(void)
 }
 
 static void *
-shmset(size_t bytes, char *fn, int proj_id, int *id)
+shmset(size_t bytes, char *fn, int proj_id, int *id, int set_sem)
 {
-    key_t key;
-    int shmid;
-    void *p;
+	key_t key;
+	int shmid;
+	void *p;
 
-    if ((key = ftok(fn, proj_id)) < 0) {
-        debug_abort("ftok fails with errno %d\n", errno);
-        return NULL;
-    }
+	if ((key = ftok(fn, proj_id)) < 0) {
+		debug_abort("ftok fails with errno %d\n", errno);
+		return NULL;
+	}
 
-    if ((shmid = shmget(key, bytes, 0666|IPC_CREAT|IPC_EXCL)) < 0) {
-        if (errno == EEXIST) {
-            shmid = shmget(key, bytes, 0666);
-            p = shmat(shmid, NULL, 0);
-        } else {
-            debug_abort("shmget fails (bytes: %d, fn: %s, proj_id: %d), errnor:%d\n", (int) bytes, fn, proj_id, errno);
-            p = NULL;
-        }
-    } else {
-        debug_print("shm create done by pid: %d\n", getpid());
-        p = shmat(shmid, NULL, 0);
-        /* sem is at the beginning of the buffer. */
-        if (sem_init(p, 1, 0) != 0)
-            debug_abort("sem_init() fails with errno %d", errno);
-        debug_print("sem_init OK at addr %p", p);
-    }
+	if ((shmid = shmget(key, bytes, 0666|IPC_CREAT|IPC_EXCL)) < 0) {
+		if (errno == EEXIST) {
+			shmid = shmget(key, bytes, 0666);
+			p = shmat(shmid, NULL, 0);
+		} else {
+			debug_abort("shmget fails (bytes: %d, fn: %s, proj_id: %d), errnor:%d\n", (int) bytes, fn, proj_id, errno);
+			p = NULL;
+		}
+	} else {
+		debug_print("shm create done by pid: %d\n", getpid());
+		p = shmat(shmid, NULL, 0);
+		if (set_sem) {
+			/* sem is at the beginning of the buffer. */
+			if (bytes <= sizeof(sem_t))
+				debug_abort("shared memory size is too small: %d < %d\n", bytes, sizeof(sem_t));
+			if (sem_init(p, 1, 0) != 0)
+				debug_abort("sem_init() fails with errno %d", errno);
+			debug_print("sem_init OK at addr %p", p);
+		}
+	}
 
-    *id = shmid;
+	*id = shmid;
 
-    debug_print("Use shm id %d, addr %p, pid: %d\n", *id, p, getpid());
+	debug_print("Use shm id %d, addr %p, pid: %d\n", *id, p, getpid());
 
-    return p;
+	return p;
 }
 
-#define SEM_S_TX_FILE "/tmp/tmp.sem.server.tx"
-#define SEM_C_TX_FILE "/tmp/tmp.sem.client.tx"
+#define SHM_S_TX_FILE "/tmp/tmp.shm.server.tx"
+#define SHM_C_TX_FILE "/tmp/tmp.shm.client.tx"
 void
 sem_server_handler()
 {
 	sem_t *p_tx, *p_rx;
 	int id_tx, id_rx, i;
 
-	unlink(SEM_S_TX_FILE);
-	if (creat(SEM_S_TX_FILE, 0666) < 0)
-		debug_abort("cannot create file %s with errno %d\n", SEM_S_TX_FILE, errno);
-	unlink(SEM_C_TX_FILE);
-	if (creat(SEM_C_TX_FILE, 0666) < 0)
-		debug_abort("cannot create file %s with errno %d\n", SEM_C_TX_FILE, errno);
-	p_tx = shmset(sizeof(sem_t), SEM_S_TX_FILE, 't', &id_tx);
-	p_rx = shmset(sizeof(sem_t), SEM_C_TX_FILE, 't', &id_rx);
+	unlink(SHM_S_TX_FILE);
+	if (creat(SHM_S_TX_FILE, 0666) < 0)
+		debug_abort("cannot create file %s with errno %d\n", SHM_S_TX_FILE, errno);
+	unlink(SHM_C_TX_FILE);
+	if (creat(SHM_C_TX_FILE, 0666) < 0)
+		debug_abort("cannot create file %s with errno %d\n", SHM_C_TX_FILE, errno);
+	p_tx = shmset(sizeof(sem_t), SHM_S_TX_FILE, 't', &id_tx, 1);
+	p_rx = shmset(sizeof(sem_t), SHM_C_TX_FILE, 't', &id_rx, 1);
 
 	for (i = 0; i < loop_cnt; i++) {
 		sem_post(p_tx);
@@ -118,8 +123,8 @@ sem_client_handler()
 	int id_tx, id_rx, i;
 	struct timespec t1, t2;
 
-	p_rx = shmset(sizeof(sem_t), SEM_S_TX_FILE, 't', &id_rx);
-	p_tx = shmset(sizeof(sem_t), SEM_C_TX_FILE, 't', &id_tx);
+	p_rx = shmset(sizeof(sem_t), SHM_S_TX_FILE, 't', &id_rx, 0);
+	p_tx = shmset(sizeof(sem_t), SHM_C_TX_FILE, 't', &id_tx, 0);
 
 	t1 = gettimespec();
 	for (i = 0; i < loop_cnt; i++) {
@@ -135,6 +140,64 @@ sem_client_handler()
 	shmctl(id_tx, IPC_RMID, NULL);
 	shmctl(id_rx, IPC_RMID, NULL);
 }
+
+void
+spin_server_handler()
+{
+	int *p_tx, *p_rx;
+	int id_tx, id_rx, i;
+
+	unlink(SHM_S_TX_FILE);
+	if (creat(SHM_S_TX_FILE, 0666) < 0)
+		debug_abort("cannot create file %s with errno %d\n", SHM_S_TX_FILE, errno);
+	unlink(SHM_C_TX_FILE);
+	if (creat(SHM_C_TX_FILE, 0666) < 0)
+		debug_abort("cannot create file %s with errno %d\n", SHM_C_TX_FILE, errno);
+
+	p_tx = shmset(sizeof(int), SHM_S_TX_FILE, 't', &id_tx, 0);
+	p_rx = shmset(sizeof(int), SHM_C_TX_FILE, 't', &id_rx, 0);
+	*p_tx = 0;
+	*p_rx = 0;
+
+	for (i = 0; i < loop_cnt; i++) {
+		*p_tx = 1;
+		while (*p_rx == 0); *p_rx = 0;
+	}
+
+	sleep(3);
+
+	shmdt((void *) p_tx);
+	shmdt((void *) p_rx);
+	shmctl(id_tx, IPC_RMID, NULL);
+	shmctl(id_rx, IPC_RMID, NULL);
+}
+
+void
+spin_client_handler()
+{
+	int *p_tx, *p_rx;
+	int id_tx, id_rx, i;
+	struct timespec t1, t2;
+
+	p_rx = shmset(sizeof(int), SHM_S_TX_FILE, 't', &id_rx, 0);
+	p_tx = shmset(sizeof(int), SHM_C_TX_FILE, 't', &id_tx, 0);
+
+	t1 = gettimespec();
+	for (i = 0; i < loop_cnt; i++) {
+		while (*p_rx == 0); *p_rx = 0;
+		*p_tx = 1;
+	}
+	t2 = gettimespec();
+	fprintf(stderr, "Time spent: %.5fs\n", (t2.tv_sec - t1.tv_sec) + (t2.tv_nsec - t1.tv_nsec)/1000.0/1000.0/1000.0);
+
+	sleep(3);
+
+	shmdt((void *) p_tx);
+	shmdt((void *) p_rx);
+	shmctl(id_tx, IPC_RMID, NULL);
+	shmctl(id_rx, IPC_RMID, NULL);
+}
+
 
 #define UDS_FILE "/tmp/tmp.uds"
 
@@ -185,11 +248,11 @@ uds_client_handler()
 		debug_abort("socket() fails with errno %d", errno);
 
 	/* Now connect to the server at first. */
-    memset(&un, 0, sizeof(un));
-    un.sun_family = AF_UNIX;
-    strncpy(un.sun_path, UDS_FILE, sizeof(un.sun_path) - 1);
+	memset(&un, 0, sizeof(un));
+	un.sun_family = AF_UNIX;
+	strncpy(un.sun_path, UDS_FILE, sizeof(un.sun_path) - 1);
 
-    if (connect(fd, (struct sockaddr *) &un, sizeof(un)) < 0)
+	if (connect(fd, (struct sockaddr *) &un, sizeof(un)) < 0)
 		debug_abort("connect() fails with errno %d\n", errno);
 
 	t1 = gettimespec();
@@ -210,7 +273,7 @@ show_usage()
 {
 	fprintf(stderr, "Usage: [-v] -t type [-p] [-e time] [-n test_loop_cnt] [-h]\n");
 	fprintf(stderr, "	-v: verbose printing\n");
-	fprintf(stderr, "	-t type: (u: unix domain socket, s: semaphore)\n");
+	fprintf(stderr, "	-t type: (u: unix domain socket, s: semaphore, p: spin)\n");
 	fprintf(stderr, "	-p: Use process instead (pthread if not specified)\n");
 	fprintf(stderr, "	-e seconds: sleep time after test is done. People might want to check process info.\n");
 	fprintf(stderr, "	-n count: Test loop count. %d by default\n", DEFAULT_LOOP_CNT);
@@ -228,47 +291,56 @@ main(int argc, char *argv[])
 	int sleep_time = 1;
 
 	use_process = 1;
-    while((opt = getopt( argc, argv, "vpe:n:t:h")) != -1) {
-        switch( opt ) {
-            case 'v':
-                is_verbose = 1;
-                break;
+	while((opt = getopt( argc, argv, "vpe:n:t:h")) != -1) {
+		switch( opt ) {
+		case 'v':
+			is_verbose = 1;
+			break;
 
-            case 't':
-                if (strlen(optarg) != 1 || (optarg[0] != 'u' && optarg[0] != 's'))
+		case 't':
+			if (strlen(optarg) != 1)
+				debug_abort("Unknown type: '%s'\n", optarg);
+
+			switch (optarg[0]) {
+				case 'u':
+					ipc_type = IPC_UDS;
+					break;
+				case 's':
+					ipc_type = IPC_SEM;
+					break;
+				case 'p':
+					ipc_type = IPC_SPIN;
+					break;
+				defaut:
 					debug_abort("Unknown type: '%s'\n", optarg);
-				if (optarg[0] == 'u')
-					ipc_type = IPC_UDS;	
-				if (optarg[0] == 's')
-					ipc_type = IPC_SEM;	
-				break;
+			}
+			break;
 
-            case 'p':
-                use_process = 1;
-                break;
+		case 'p':
+			use_process = 1;
+			break;
 
-            case 'e':
-				/* For testing so no sanity-checking here. */
-                sleep_time = atoi(optarg);
-				if (sleep_time < 0)
-					sleep_time = 1;
-                break;
+		case 'e':
+					/* For testing so no sanity-checking here. */
+			sleep_time = atoi(optarg);
+			if (sleep_time < 0)
+				sleep_time = 1;
+			break;
 
-            case 'n':
-                loop_cnt = atoi(optarg);
-                break;
+		case 'n':
+			loop_cnt = atoi(optarg);
+			break;
 
-           case 'h':
-            case '?':
-                show_usage();
-				exit(1);
-                break;
+		case 'h':
+		case '?':
+			show_usage();
+			exit(1);
+			break;
 
-            default:
-                /* You won't actually get here. */
-                break;
-        }
-    }
+		default:
+			break;
+		}
+	}
 
 	test.ipc_type = ipc_type;
 	switch (ipc_type) {
@@ -281,6 +353,11 @@ main(int argc, char *argv[])
 			test.desc = "unix domain socket";
 			test.server_handler = uds_server_handler;
 			test.client_handler = uds_client_handler;
+			break;
+		case IPC_SPIN:
+			test.desc = "spin";
+			test.server_handler = spin_server_handler;
+			test.client_handler = spin_client_handler;
 			break;
 		default:
 			debug_abort("Must set an ipc type.\n");
@@ -299,7 +376,7 @@ main(int argc, char *argv[])
 			test.server_handler();
 		} else {
 			/* child. Leave some time to server for prepartion. */
-			sleep(5);
+			sleep(3);
 			test.client_handler();
 		}
 	} else {
@@ -311,9 +388,9 @@ main(int argc, char *argv[])
 		retval = pthread_create(&thd, NULL, test.server_handler);
 		if (retval)
 			debug_abort("pthread_create() fails with errno %d\n", errno);
-		retval = pthread_create(&thd, NULL, test.client_handler);
-		if (retval)
-			debug_abort("pthread_create() fails with errno %d\n", errno);
+
+		sleep(3);
+		test.client_handler();
 	}
 
 	sleep(sleep_time);
