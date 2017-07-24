@@ -72,7 +72,7 @@ shmset(size_t bytes, char *fn, int proj_id, int *id, int set_sem)
 		p = shmat(shmid, NULL, 0);
 		if (set_sem) {
 			/* sem is at the beginning of the buffer. */
-			if (bytes <= sizeof(sem_t))
+			if (bytes < sizeof(sem_t))
 				debug_abort("shared memory size is too small: %d < %d\n", bytes, sizeof(sem_t));
 			if (sem_init(p, 1, 0) != 0)
 				debug_abort("sem_init() fails with errno %d", errno);
