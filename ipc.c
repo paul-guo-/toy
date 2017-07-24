@@ -380,7 +380,7 @@ main(int argc, char *argv[])
 			test.client_handler();
 		}
 	} else {
-		fprintf(stderr, "Test '%s' with loop count %d with processes\n", test.desc, loop_cnt);
+		fprintf(stderr, "Test '%s' with loop count %d with threads\n", test.desc, loop_cnt);
 
 		pthread_t thd;
 
