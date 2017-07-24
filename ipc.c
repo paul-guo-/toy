@@ -11,8 +11,6 @@
 #include <sys/shm.h>
 
 static int is_verbose;
-static int is_server;
-enum IPC_TYPE ipc_type;
 
 enum IPC_TYPE {
 	IPC_NONE,	/* none */
@@ -23,8 +21,17 @@ enum IPC_TYPE {
 #define DEFAULT_LOOP_CNT 100000
 static int loop_cnt = DEFAULT_LOOP_CNT;
 
-#define debug_print(...) if (is_verbose) fprintf(stderr, __VA_ARGS__)
-#define debug_abort(...)  {fprintf(stderr, __VA_ARGS__); fflush(stderr); exit(1); }
+#define debug_print(...) do { if (is_verbose) fprintf(stderr, __VA_ARGS__); } while (0)
+#define debug_abort(...)  do {fprintf(stderr, __VA_ARGS__); fflush(stderr); exit(1); } while (0)
+
+typedef void (*handler)(void);
+
+struct ipc_test {
+	enum IPC_TYPE ipc_type;
+	char *desc;
+	handler server_handler;
+	handler client_handler;
+};
 
 struct timespec
 gettimespec(void)
@@ -97,7 +104,7 @@ sem_server_handler()
 		sem_wait(p_rx);
 	}
 
-	sleep(5);
+	sleep(3);
 	shmdt(p_tx);
 	shmdt(p_rx);
 	shmctl(id_tx, IPC_RMID, NULL);
@@ -122,7 +129,7 @@ sem_client_handler()
 	t2 = gettimespec();
 	fprintf(stderr, "Time spent: %.5fs\n", (t2.tv_sec - t1.tv_sec) + (t2.tv_nsec - t1.tv_nsec)/1000.0/1000.0/1000.0);
 
-	sleep(5);
+	sleep(3);
 	shmdt(p_tx);
 	shmdt(p_rx);
 	shmctl(id_tx, IPC_RMID, NULL);
@@ -201,36 +208,30 @@ uds_client_handler()
 static void
 show_usage()
 {
-	fprintf(stderr, "Usage: [-v] -s|-c -t type [-n test_cnt]\n");
-	fprintf(stderr, "	-v: verbose\n");
-	fprintf(stderr, "	-s: server\n");
-	fprintf(stderr, "	-c: client\n");
-	fprintf(stderr, "	-n: test loop count. %d by default\n", DEFAULT_LOOP_CNT);
-	fprintf(stderr, "	-t: type (u: unix domain socket, s: semaphore)\n");
+	fprintf(stderr, "Usage: [-v] -t type [-p] [-e time] [-n test_loop_cnt] [-h]\n");
+	fprintf(stderr, "	-v: verbose printing\n");
+	fprintf(stderr, "	-t type: (u: unix domain socket, s: semaphore)\n");
+	fprintf(stderr, "	-p: Use process instead (Use pthread by default)\n");
+	fprintf(stderr, "	-e seconds: sleep times after test is done. People might want to check process stat data.\n");
+	fprintf(stderr, "	-n count: Test loop count. %d by default\n", DEFAULT_LOOP_CNT);
+	fprintf(stderr, "	-h: Show usage.\n");
 }
 
-
+/* Compile it with: -lpthread -lrt */
 int
 main(int argc, char *argv[])
 {
-	int is_client, opt;
+	int opt, retval;
+	struct ipc_test test;
+	int use_process = 0;
+	enum IPC_TYPE ipc_type = IPC_NONE;
+	int sleep_time = 1;
 
-    while((opt = getopt( argc, argv, "vscn:t:h")) != -1) {
+	use_process = 1;
+    while((opt = getopt( argc, argv, "vpe:n:t:h")) != -1) {
         switch( opt ) {
             case 'v':
                 is_verbose = 1;
-                break;
-
-            case 's':
-                is_server = 1;
-                break;
-
-            case 'c':
-                is_client = 1;
-                break;
-
-            case 'n':
-                loop_cnt = atoi(optarg);
                 break;
 
             case 't':
@@ -242,7 +243,22 @@ main(int argc, char *argv[])
 					ipc_type = IPC_SEM;	
 				break;
 
-            case 'h':
+            case 'p':
+                use_process = 1;
+                break;
+
+            case 'e':
+				/* For testing so no sanity-checking here. */
+                sleep_time = atoi(optarg);
+				if (sleep_time < 0)
+					sleep_time = 1;
+                break;
+
+            case 'n':
+                loop_cnt = atoi(optarg);
+                break;
+
+           case 'h':
             case '?':
                 show_usage();
 				exit(1);
@@ -254,27 +270,53 @@ main(int argc, char *argv[])
         }
     }
 
-	if (is_server+is_client != 1)
-		debug_abort("Must set either server or client.\n");
-
-	if (ipc_type == IPC_NONE)
-		debug_abort("Must set an ipc type.\n");
-
-	if (ipc_type == IPC_SEM) {
-		printf("Test semaphore with loop count %d\n", loop_cnt);
-		if (is_server) {
-			sem_server_handler();
-		} else {
-			sem_client_handler();
-		}
-	} else if (ipc_type == IPC_UDS) {
-		printf("Test UDS with loop count %d\n", loop_cnt);
-		if (is_server) {
-			uds_server_handler();
-		} else {
-			uds_client_handler();
-		}
+	test.ipc_type = ipc_type;
+	switch (ipc_type) {
+		case IPC_SEM:
+			test.desc = "semaphore";
+			test.server_handler = sem_server_handler;
+			test.client_handler = sem_client_handler;
+			break;
+		case IPC_UDS:
+			test.desc = "unix domain socket";
+			test.server_handler = uds_server_handler;
+			test.client_handler = uds_client_handler;
+			break;
+		default:
+			debug_abort("Must set an ipc type.\n");
 	}
+
+	if (use_process) {
+
+		fprintf(stderr, "Test '%s' with loop count %d with processes\n", test.desc, loop_cnt);
+
+		retval = fork();
+
+		if (retval < 0) {
+			debug_abort("fork() fails with errno %d\n", errno);
+		} else if (retval > 0) {
+			/* parent */
+			test.server_handler();
+		} else {
+			/* child. Leave some time to server for prepartion. */
+			sleep(5);
+			test.client_handler();
+		}
+	} else {
+		fprintf(stderr, "Test '%s' with loop count %d with processes\n", test.desc, loop_cnt);
+
+		pthread_t thd;
+
+		/* no shm creation for pthread is needed however I'm lazy to modify. */
+		retval = pthread_create(&thd, NULL, test.server_handler);
+		if (retval)
+			debug_abort("pthread_create() fails with errno %d\n", errno);
+		retval = pthread_create(&thd, NULL, test.client_handler);
+		if (retval)
+			debug_abort("pthread_create() fails with errno %d\n", errno);
+	}
+
+	sleep(sleep_time);
 
 	return 0;
 }
