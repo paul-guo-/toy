@@ -9,13 +9,18 @@
 #include <sys/un.h>
 #include <sys/types.h>
 #include <sys/shm.h>
+#include <sys/sem.h>
+#include <sys/ipc.h>
+
+/* A simple ipc test program. */
 
 static int is_verbose;
 
 enum IPC_TYPE {
 	IPC_NONE,	/* none */
 	IPC_UDS,	/* unix domain socket */
-	IPC_SEM,	/* semaphore */
+	IPC_SEM_POSIX,	/* semaphore (posix) */
+	IPC_SEM_SYSTEMV,	/* semaphore (system v) */
 	IPC_SPIN,	/* spin checking via shared memory. */
 };
 
@@ -47,6 +52,7 @@ gettimespec(void)
 	return ts;
 }
 
+/* system v4 */
 static void *
 shmset(size_t bytes, char *fn, int proj_id, int *id, int set_sem)
 {
@@ -87,10 +93,11 @@ shmset(size_t bytes, char *fn, int proj_id, int *id, int set_sem)
 	return p;
 }
 
+/* posix */
 #define SHM_S_TX_FILE "/tmp/tmp.shm.server.tx"
 #define SHM_C_TX_FILE "/tmp/tmp.shm.client.tx"
 void
-sem_server_handler()
+sem_server_posix_handler()
 {
 	sem_t *p_tx, *p_rx;
 	int id_tx, id_rx, i;
@@ -117,7 +124,7 @@ sem_server_handler()
 }
 
 void
-sem_client_handler()
+sem_client_posix_handler()
 {
 	sem_t *p_tx, *p_rx;
 	int id_tx, id_rx, i;
@@ -139,6 +146,111 @@ sem_client_handler()
 	shmdt(p_rx);
 	shmctl(id_tx, IPC_RMID, NULL);
 	shmctl(id_rx, IPC_RMID, NULL);
+}
+
+
+
+union semun {
+	int val;	/* value for SETVAL */
+	struct semid_ds *buf;	/* buffer for IPC_STAT, IPC_SET */
+	unsigned short int *array; 	/* array for GETALL, SETALL */
+	struct seminfo *__buf;	/* buffer for IPC_INFO */
+};
+
+/* System V */
+static int
+semset(char *fn, int proj_id)
+{
+	key_t key;
+	int semid;
+
+	if ((key = ftok(fn, proj_id)) < 0) {
+		debug_abort("ftok fails with errno %d\n", errno);
+	}
+
+	if ((semid = semget(key, 1, 0666|IPC_CREAT|IPC_EXCL)) < 0) {
+		if (errno == EEXIST) {
+			semid = semget(key, 0, 0666);
+		} else {
+			debug_abort("semget fails (fn: %s, proj_id: %d), errnor:%d\n", fn, proj_id, errno);
+		}
+	} else {
+		union semun semopts;
+
+		semopts.val = 0;
+		semctl(semid, 0, SETVAL, semopts);
+
+		debug_print("sem create done by pid: %d\n", getpid());
+	}
+
+	debug_print("Use sem id %d, pid: %d\n", semid, getpid());
+
+	return semid;
+}
+
+static int
+P(int semid)
+{
+	struct sembuf sops={0, -1, SEM_UNDO};
+
+	return semop(semid, &sops, 1);
+}
+
+static int
+V(int semid)
+{
+	struct sembuf sops={0, +1, SEM_UNDO};
+
+	return semop(semid, &sops, 1);
+}
+
+
+#define SEM_S_TX_FILE "/tmp/tmp.sem.server.tx"
+#define SEM_C_TX_FILE "/tmp/tmp.sem.client.tx"
+void
+sem_server_v4_handler()
+{
+	int id_tx, id_rx, i;
+
+	unlink(SEM_S_TX_FILE);
+	if (creat(SEM_S_TX_FILE, 0666) < 0)
+		debug_abort("cannot create file %s with errno %d\n", SEM_S_TX_FILE, errno);
+	unlink(SEM_C_TX_FILE);
+	if (creat(SEM_C_TX_FILE, 0666) < 0)
+		debug_abort("cannot create file %s with errno %d\n", SEM_C_TX_FILE, errno);
+	id_tx = semset(SEM_S_TX_FILE, 't');
+	id_rx = semset(SEM_C_TX_FILE, 't');
+
+	for (i = 0; i < loop_cnt; i++) {
+		V(id_tx);
+		P(id_rx);
+	}
+
+	sleep(3);
+	semctl(id_tx, 0, IPC_RMID, NULL);
+	semctl(id_rx, 0, IPC_RMID, NULL);
+}
+
+void
+sem_client_v4_handler()
+{
+	int id_tx, id_rx, i;
+	struct timespec t1, t2;
+
+	id_rx = semset(SEM_S_TX_FILE, 't');
+	id_tx = semset(SEM_C_TX_FILE, 't');
+
+	t1 = gettimespec();
+	for (i = 0; i < loop_cnt; i++) {
+		P(id_rx);
+		V(id_tx);
+	}
+	t2 = gettimespec();
+	fprintf(stderr, "Time spent: %.5fs\n", (t2.tv_sec - t1.tv_sec) + (t2.tv_nsec - t1.tv_nsec)/1000.0/1000.0/1000.0);
+
+	sleep(3);
+	semctl(id_tx, 0, IPC_RMID, NULL);
+	semctl(id_rx, 0, IPC_RMID, NULL);
 }
 
 void
@@ -273,7 +385,8 @@ show_usage()
 {
 	fprintf(stderr, "Usage: [-v] -t type [-p] [-e time] [-n test_loop_cnt] [-h]\n");
 	fprintf(stderr, "	-v: verbose printing\n");
-	fprintf(stderr, "	-t type: (u: unix domain socket, s: semaphore, p: spin)\n");
+	fprintf(stderr, "	-t type: (u: unix domain socket, s: semaphore (posix), "
+			"y: semaphore (system v), p: spin)\n");
 	fprintf(stderr, "	-p: Use process instead (pthread if not specified)\n");
 	fprintf(stderr, "	-e seconds: sleep time after test is done. People might want to check process info.\n");
 	fprintf(stderr, "	-n count: Test loop count. %d by default\n", DEFAULT_LOOP_CNT);
@@ -305,7 +418,10 @@ main(int argc, char *argv[])
 					ipc_type = IPC_UDS;
 					break;
 				case 's':
-					ipc_type = IPC_SEM;
+					ipc_type = IPC_SEM_POSIX;
+					break;
+				case 'y':
+					ipc_type = IPC_SEM_SYSTEMV;
 					break;
 				case 'p':
 					ipc_type = IPC_SPIN;
@@ -343,10 +459,15 @@ main(int argc, char *argv[])
 
 	test.ipc_type = ipc_type;
 	switch (ipc_type) {
-		case IPC_SEM:
-			test.desc = "semaphore";
-			test.server_handler = sem_server_handler;
-			test.client_handler = sem_client_handler;
+		case IPC_SEM_POSIX:
+			test.desc = "semaphore (posix)";
+			test.server_handler = sem_server_posix_handler;
+			test.client_handler = sem_client_posix_handler;
+			break;
+		case IPC_SEM_SYSTEMV:
+			test.desc = "semaphore (system v)";
+			test.server_handler = sem_server_v4_handler;
+			test.client_handler = sem_client_v4_handler;
 			break;
 		case IPC_UDS:
 			test.desc = "unix domain socket";
