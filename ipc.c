@@ -101,6 +101,7 @@ sem_server_posix_handler()
 {
 	sem_t *p_tx, *p_rx;
 	int id_tx, id_rx, i;
+	int retval = 0;
 
 	unlink(SHM_S_TX_FILE);
 	if (creat(SHM_S_TX_FILE, 0666) < 0)
@@ -112,8 +113,12 @@ sem_server_posix_handler()
 	p_rx = shmset(sizeof(sem_t), SHM_C_TX_FILE, 't', &id_rx, 1);
 
 	for (i = 0; i < loop_cnt; i++) {
-		sem_post(p_tx);
-		sem_wait(p_rx);
+		retval = sem_post(p_tx);
+		if (retval < 0)
+			debug_abort("In %s(), sem_post() returns %d with errno %d in cnt %d\n", __func__, retval, errno, i);
+		retval = sem_wait(p_rx);
+		if (retval < 0)
+			debug_abort("In %s(), sem_post() returns %d with errno %d in cnt %d\n", __func__, retval, errno, i);
 	}
 
 	sleep(3);
@@ -129,14 +134,19 @@ sem_client_posix_handler()
 	sem_t *p_tx, *p_rx;
 	int id_tx, id_rx, i;
 	struct timespec t1, t2;
+	int retval = 0;
 
 	p_rx = shmset(sizeof(sem_t), SHM_S_TX_FILE, 't', &id_rx, 0);
 	p_tx = shmset(sizeof(sem_t), SHM_C_TX_FILE, 't', &id_tx, 0);
 
 	t1 = gettimespec();
 	for (i = 0; i < loop_cnt; i++) {
-		sem_wait(p_rx);
-		sem_post(p_tx);
+		retval = sem_wait(p_rx);
+		if (retval < 0)
+			debug_abort("In %s(), sem_post() returns %d with errno %d in cnt %d\n", __func__, retval, errno, i);
+		retval = sem_post(p_tx);
+		if (retval < 0)
+			debug_abort("In %s(), sem_post() returns %d with errno %d in cnt %d\n", __func__, retval, errno, i);
 	}
 	t2 = gettimespec();
 	fprintf(stderr, "Time spent: %.5fs\n", (t2.tv_sec - t1.tv_sec) + (t2.tv_nsec - t1.tv_nsec)/1000.0/1000.0/1000.0);
@@ -177,7 +187,7 @@ semset(char *fn, int proj_id)
 	} else {
 		union semun semopts;
 
-		semopts.val = 0;
+		semopts.val = 1;
 		semctl(semid, 0, SETVAL, semopts);
 
 		debug_print("sem create done by pid: %d\n", getpid());
@@ -191,7 +201,7 @@ semset(char *fn, int proj_id)
 static int
 P(int semid)
 {
-	struct sembuf sops={0, -1, SEM_UNDO};
+	struct sembuf sops={0, -1, 0};
 
 	return semop(semid, &sops, 1);
 }
@@ -199,7 +209,7 @@ P(int semid)
 static int
 V(int semid)
 {
-	struct sembuf sops={0, +1, SEM_UNDO};
+	struct sembuf sops={0, +1, 0};
 
 	return semop(semid, &sops, 1);
 }
@@ -211,6 +221,7 @@ void
 sem_server_v4_handler()
 {
 	int id_tx, id_rx, i;
+	int retval = 0;
 
 	unlink(SEM_S_TX_FILE);
 	if (creat(SEM_S_TX_FILE, 0666) < 0)
@@ -222,8 +233,12 @@ sem_server_v4_handler()
 	id_rx = semset(SEM_C_TX_FILE, 't');
 
 	for (i = 0; i < loop_cnt; i++) {
-		V(id_tx);
-		P(id_rx);
+		retval = V(id_tx);
+		if (retval < 0)
+			debug_abort("In %s(), V() returns %d with errno %d in cnt %d\n", __func__, retval, errno, i);
+		retval = P(id_rx);
+		if (retval < 0)
+			debug_abort("In %s(), P() returns %d with errno %d in cnt %d\n", __func__, retval, errno, i);
 	}
 
 	sleep(3);
@@ -236,14 +251,19 @@ sem_client_v4_handler()
 {
 	int id_tx, id_rx, i;
 	struct timespec t1, t2;
+	int retval = 0;
 
 	id_rx = semset(SEM_S_TX_FILE, 't');
 	id_tx = semset(SEM_C_TX_FILE, 't');
 
 	t1 = gettimespec();
 	for (i = 0; i < loop_cnt; i++) {
-		P(id_rx);
-		V(id_tx);
+		retval = P(id_rx);
+		if (retval < 0)
+			debug_abort("In %s(), P() returns %d with errno %d in cnt %d\n", __func__, retval, errno, i);
+		retval = V(id_tx);
+		if (retval < 0)
+			debug_abort("In %s(), V() returns %d with errno %d in cnt %d\n", __func__, retval, errno, i);
 	}
 	t2 = gettimespec();
 	fprintf(stderr, "Time spent: %.5fs\n", (t2.tv_sec - t1.tv_sec) + (t2.tv_nsec - t1.tv_nsec)/1000.0/1000.0/1000.0);
@@ -511,6 +531,7 @@ main(int argc, char *argv[])
 
 		sleep(3);
 		test.client_handler();
+		pthread_join(thd, NULL);
 	}
 
 	sleep(sleep_time);
